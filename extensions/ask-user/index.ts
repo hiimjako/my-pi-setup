@@ -53,6 +53,19 @@ const AskUserParams = Type.Object({
 
 export type AskUserInput = Static<typeof AskUserParams>;
 
+export type AskUserResponse = { index: number } | { text: string } | null;
+
+export interface AskUserRequest extends AskUserInput {
+  id: string;
+  signal: AbortSignal;
+  respond: (response: AskUserResponse) => void;
+}
+
+export interface AskUserResolved {
+  id: string;
+  response: AskUserResponse;
+}
+
 interface AskUserDetails {
   question: string;
   options: string[];
@@ -61,11 +74,10 @@ interface AskUserDetails {
   cancelled: boolean;
 }
 
-type SelectionResult = {
-  answer: string;
-  wasCustom: boolean;
-  index?: number;
-} | null;
+type SelectionResult =
+  | { answer: string; wasCustom: false; index: number }
+  | { answer: string; wasCustom: true }
+  | null;
 
 interface DisplayOption {
   label: string;
@@ -105,7 +117,7 @@ export default function askUser(pi: ExtensionAPI) {
     promptGuidelines: ASK_USER_PROMPT_GUIDELINES,
     parameters: AskUserParams,
 
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const reply = (
         text: string,
         answer: string | null = null,
@@ -329,10 +341,64 @@ export default function askUser(pi: ExtensionAPI) {
           };
         });
 
+      const question = new AbortController();
+      const externalAnswer = Effect.callback<SelectionResult>((resume) => {
+        let pending = true;
+        pi.events.emit("ask-user:request", {
+          id: toolCallId,
+          question: params.question,
+          options: params.options.map((option) => ({ ...option })),
+          signal: question.signal,
+          respond(response) {
+            if (!pending || question.signal.aborted) return;
+            let result: SelectionResult;
+            if (response === null) {
+              result = null;
+            } else if (typeof response !== "object") {
+              return;
+            } else if (
+              "index" in response &&
+              Number.isInteger(response.index) &&
+              response.index >= 1 &&
+              response.index <= params.options.length
+            ) {
+              result = {
+                answer: params.options[response.index - 1].label,
+                wasCustom: false,
+                index: response.index,
+              };
+            } else if (
+              "text" in response &&
+              typeof response.text === "string" &&
+              response.text.trim()
+            ) {
+              result = { answer: response.text.trim(), wasCustom: true };
+            } else {
+              return;
+            }
+            pending = false;
+            resume(Effect.succeed(result));
+          },
+        } satisfies AskUserRequest);
+        return Effect.sync(() => {
+          pending = false;
+        });
+      });
       const uiExit = await Effect.runPromiseExit(
-        Effect.tryPromise(showQuestion),
+        Effect.raceFirst(externalAnswer, Effect.tryPromise(showQuestion)),
         signal ? { signal } : undefined,
       );
+      let response: AskUserResponse = null;
+      if (Exit.isSuccess(uiExit) && uiExit.value) {
+        response = uiExit.value.wasCustom
+          ? { text: uiExit.value.answer }
+          : { index: uiExit.value.index };
+      }
+      pi.events.emit("ask-user:resolved", {
+        id: toolCallId,
+        response,
+      } satisfies AskUserResolved);
+      question.abort();
 
       if (Exit.isFailure(uiExit)) {
         if (Cause.hasInterruptsOnly(uiExit.cause)) {

@@ -18,6 +18,6 @@
     "format": "prettier --write \"extensions/**/*.{ts,cjs}\" \"*.json\"",
     "format:check": "prettier --check \"extensions/**/*.{ts,cjs}\" \"*.json\"",
     "test": "node --test --experimental-strip-types extensions/*/*.test.ts && npm --prefix extensions/file-search test",
-    "postinstall": "npm ci --prefix extensions/ask-user"
+    "postinstall": "npm ci --prefix extensions/ask-user --include=dev"
   }
 }

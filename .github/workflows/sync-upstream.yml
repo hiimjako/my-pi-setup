@@ -60,6 +60,7 @@ jobs:
         env:
           BASE_SHA: ${{ steps.merge.outputs.base }}
         run: |
+          npm ci --omit=dev --legacy-peer-deps
           npm ci
           node --test --experimental-strip-types extensions/ask-user/index.test.ts
           npm --prefix extensions/ask-user run check

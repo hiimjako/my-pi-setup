@@ -1,0 +1,107 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+
+jobs:
+  validate:
+    if: github.repository == 'hiimjako/my-pi-setup'
+    runs-on: ubuntu-latest
+    outputs:
+      base: ${{ steps.merge.outputs.base }}
+      upstream: ${{ steps.merge.outputs.upstream }}
+      tree: ${{ steps.merge.outputs.tree }}
+      changed: ${{ steps.merge.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.DEFAULT_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge upstream and record candidate
+        id: merge
+        shell: bash
+        run: |
+          base=$(git rev-parse HEAD)
+          git fetch --no-tags https://github.com/davis7dotsh/my-pi-setup.git main
+          upstream=$(git rev-parse FETCH_HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit "$upstream"
+          {
+            echo "base=$base"
+            echo "upstream=$upstream"
+            echo "tree=$(git rev-parse 'HEAD^{tree}')"
+            if [[ $(git rev-parse HEAD) != "$base" ]]; then
+              echo 'changed=true'
+            else
+              echo 'changed=false'
+            fi
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        with:
+          node-version: 24
+      # Project code only executes in this read-only job, without persisted credentials.
+      - name: Validate candidate
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        env:
+          BASE_SHA: ${{ steps.merge.outputs.base }}
+        run: |
+          npm ci
+          node --test --experimental-strip-types extensions/ask-user/index.test.ts
+          npm --prefix extensions/ask-user run check
+          node_modules/.bin/prettier --check extensions/ask-user/index.ts extensions/ask-user/index.test.ts
+          git diff --check "$BASE_SHA" HEAD
+          git diff --check
+
+  publish:
+    if: github.repository == 'hiimjako/my-pi-setup' && needs.validate.outputs.changed == 'true'
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      BASE_SHA: ${{ needs.validate.outputs.base }}
+      UPSTREAM_SHA: ${{ needs.validate.outputs.upstream }}
+      TREE_SHA: ${{ needs.validate.outputs.tree }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.base }}
+          fetch-depth: 0
+          persist-credentials: false
+      # Rebuild from exact inputs; never execute project code in the write-capable job.
+      - name: Rebuild and verify validated tree
+        shell: bash
+        run: |
+          for sha in "$BASE_SHA" "$UPSTREAM_SHA" "$TREE_SHA"; do
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          done
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          git fetch --no-tags https://github.com/davis7dotsh/my-pi-setup.git "$UPSTREAM_SHA"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git merge --no-edit "$UPSTREAM_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TREE_SHA"
+      - name: Push to fork without force
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags https://github.com/hiimjako/my-pi-setup.git "$DEFAULT_BRANCH"
+          test "$(git rev-parse FETCH_HEAD)" = "$BASE_SHA"
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push https://github.com/hiimjako/my-pi-setup.git "HEAD:refs/heads/$DEFAULT_BRANCH"

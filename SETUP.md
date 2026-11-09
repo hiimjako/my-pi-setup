@@ -4,8 +4,10 @@ Clone or copy this repository to `~/.pi/agent`, then install its dependencies:
 
 ```sh
 cd ~/.pi/agent
-npm install
+npm install --legacy-peer-deps
 ```
+
+Pi supplies the host packages declared in `peerDependencies`; `--legacy-peer-deps` prevents npm from installing duplicate copies.
 
 ## Firecrawl
 
